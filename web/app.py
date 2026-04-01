@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Web GUI for Audio Router."""
 
-import json
 import os
+import select
 import signal
 import subprocess
 import sys
@@ -15,7 +15,7 @@ ROUTER_DIR = Path(__file__).parent.parent
 AUDIOTEE_PATH = ROUTER_DIR / "bin" / "audiotee"
 ROUTER_SCRIPT = ROUTER_DIR / "bin" / "audio_router.py"
 
-app = Flask(__name__, template_folder=str(ROUTER_DIR / "web"))
+app = Flask(__name__, template_folder=str(ROUTER_DIR / "web" / "templates"))
 
 router_process = None
 router_lock = threading.Lock()
@@ -54,10 +54,11 @@ def api_devices():
 @app.route("/api/status")
 def api_status():
     global router_status
-    if router_process and router_process.poll() is not None:
-        router_status["running"] = False
-        router_status["pid"] = None
-    return jsonify(router_status)
+    with router_lock:
+        if router_process and router_process.poll() is not None:
+            router_status["running"] = False
+            router_status["pid"] = None
+        return jsonify(router_status.copy())
 
 
 @app.route("/api/start", methods=["POST"])
@@ -68,7 +69,7 @@ def api_start():
         if router_status["running"]:
             return jsonify({"error": "Already running"}), 400
 
-        data = request.get_json()
+        data = request.get_json(force=True, silent=True) or {}
         full = data.get("full")
         bass = data.get("bass")
         cutoff = data.get("cutoff", 80)
@@ -118,8 +119,8 @@ def api_start():
             }
             return jsonify({"ok": True, "pid": router_process.pid})
         except Exception as e:
-            router_status["error"] = str(e)
-            return jsonify({"error": str(e)}), 500
+            router_status["error"] = "Failed to start router"
+            return jsonify({"error": "Failed to start router"}), 500
 
 
 @app.route("/api/stop", methods=["POST"])
@@ -147,10 +148,13 @@ def api_logs():
     global router_process
     if router_process and router_status["running"]:
         try:
-            line = router_process.stdout.readline()
-            if line:
-                return jsonify({"line": line.strip()})
-        except:
+            fd = router_process.stdout.fileno()
+            ready, _, _ = select.select([fd], [], [], 0.5)
+            if ready:
+                line = router_process.stdout.readline()
+                if line:
+                    return jsonify({"line": line.strip()})
+        except Exception:
             pass
     return jsonify({"line": None})
 
