@@ -126,6 +126,7 @@ document.getElementById('cutoff').oninput = function() {
 };
 document.getElementById('delay').oninput = function() {
   document.getElementById('delayVal').textContent = this.value + ' ms';
+  updateDelay(parseInt(this.value));
 };
 document.getElementById('bpm').oninput = function() {
   document.getElementById('bpmVal').textContent = this.value;
@@ -278,6 +279,14 @@ async function startMetronome() {
 async function stopMetronome() {
   await fetch('/api/metronome/stop', {method: 'POST'});
   updateMetronomeStatus();
+}
+
+async function updateDelay(delayMs) {
+  await fetch('/api/delay', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({delay_ms: delayMs}),
+  });
 }
 
 async function updateBpm(bpm) {

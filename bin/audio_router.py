@@ -18,12 +18,31 @@ import argparse
 import sys
 import os
 import json
+import time
 
 
 DEFAULT_BASS_CUTOFF = 80
 DEFAULT_DELAY_MS = 150
 DEFAULT_SAMPLE_RATE = 48000
 AUDIOTEE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "audiotee")
+CONFIG_DIR = os.path.expanduser("~/.audio-router")
+CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
+
+
+def _ensure_config_dir():
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+
+
+def _read_config():
+    try:
+        with open(CONFIG_PATH) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _get_live_delay_ms():
+    return _read_config().get("delay_ms", DEFAULT_DELAY_MS)
 
 
 class AudioteeCapture:
@@ -174,7 +193,32 @@ class AudioRouter:
         print(f"Mute Tapped:    {self.mute}")
         print()
 
+    def _resize_delay_buffer(self, new_samples):
+        if new_samples == self.delay_samples:
+            return
+
+        old_buffer = self.delay_buffer.copy()
+        old_write = self.delay_write_pos
+        old_read = self.delay_read_pos
+        old_len = self.delay_samples
+
+        self.delay_samples = new_samples
+        self.delay_buffer = np.zeros((new_samples, 2))
+
+        count = min(old_write - old_read, new_samples)
+        for i in range(count):
+            src = (old_read + i) % old_len
+            dst = i % new_samples
+            self.delay_buffer[dst] = old_buffer[src]
+
+        self.delay_write_pos = count
+        self.delay_read_pos = 0
+
     def process_chunk(self, audio):
+        live_delay_ms = _get_live_delay_ms()
+        live_samples = max(1, int(live_delay_ms * self.sample_rate / 1000))
+        self._resize_delay_buffer(live_samples)
+
         if self.zi is None:
             self.zi = np.zeros((2, 2, audio.shape[1]))
 
@@ -343,6 +387,12 @@ def main():
         print("\nError: --full and --bass are required.")
         print("Use --list to see available devices.\n")
         sys.exit(1)
+
+    _ensure_config_dir()
+    config = _read_config()
+    config["delay_ms"] = args.delay
+    with open(CONFIG_PATH, "w") as f:
+        json.dump(config, f)
 
     router = AudioRouter(
         full_output_device=args.full,

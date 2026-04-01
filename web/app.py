@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Web GUI for Audio Router."""
 
+import json
 import math
 import os
 import select
@@ -228,6 +229,28 @@ def api_logs():
         except Exception:
             pass
     return jsonify({"line": None})
+
+
+@app.route("/api/delay", methods=["POST"])
+def api_delay():
+    data = request.get_json(force=True, silent=True) or {}
+    delay_ms = data.get("delay_ms")
+    if delay_ms is None:
+        return jsonify({"error": "delay_ms required"}), 400
+    try:
+        config_dir = os.path.expanduser("~/.audio-router")
+        os.makedirs(config_dir, exist_ok=True)
+        config_path = os.path.join(config_dir, "config.json")
+        config = {}
+        if os.path.exists(config_path):
+            with open(config_path) as f:
+                config = json.load(f)
+        config["delay_ms"] = int(delay_ms)
+        with open(config_path, "w") as f:
+            json.dump(config, f)
+        return jsonify({"ok": True, "delay_ms": config["delay_ms"]})
+    except Exception:
+        return jsonify({"error": "Failed to update delay"}), 500
 
 
 @app.route("/api/metronome/status")
