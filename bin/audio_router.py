@@ -10,7 +10,6 @@ import sys
 import os
 import json
 import time
-import select
 import fcntl
 
 
