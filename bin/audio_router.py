@@ -11,6 +11,7 @@ import argparse
 import sys
 import os
 import json
+import time
 
 
 DEFAULT_BASS_CUTOFF = 80
@@ -33,10 +34,6 @@ def _read_config():
         return {}
 
 
-def _get_live_delay_ms():
-    return _read_config().get("delay_ms", DEFAULT_DELAY_MS)
-
-
 class DelayConfig:
     def __init__(self):
         self._delay_ms = DEFAULT_DELAY_MS
@@ -44,8 +41,6 @@ class DelayConfig:
         self._interval = 0.2
 
     def get(self):
-        import time
-
         now = time.time()
         if now - self._last_check > self._interval:
             self._delay_ms = _read_config().get("delay_ms", DEFAULT_DELAY_MS)
@@ -135,27 +130,6 @@ class AudioteeCapture:
                 self.proc.kill()
 
 
-class DelayLine:
-    def __init__(self, max_samples, channels=2):
-        self.buffer = np.zeros((max_samples, channels), dtype=np.float32)
-        self.max_samples = max_samples
-        self.write_pos = 0
-        self.delay_samples = 1
-
-    def set_delay(self, samples):
-        self.delay_samples = max(1, samples)
-
-    def process(self, audio):
-        n = audio.shape[0]
-        output = np.zeros_like(audio)
-        for i in range(n):
-            read_pos = (self.write_pos - self.delay_samples + i) % self.max_samples
-            output[i] = self.buffer[read_pos]
-            self.buffer[(self.write_pos + i) % self.max_samples] = audio[i]
-        self.write_pos = (self.write_pos + n) % self.max_samples
-        return output
-
-
 class AudioRouter:
     def __init__(
         self,
@@ -168,22 +142,21 @@ class AudioRouter:
     ):
         self.sample_rate = sample_rate
         self.bass_cutoff = bass_cutoff
-        self.delay_ms = delay_ms
+        self.delay_config = DelayConfig()
 
-        max_delay = int(1000 * sample_rate / 1000)
-        self.delay = DelayLine(max_delay)
-        self.delay.set_delay(int(delay_ms * sample_rate / 1000))
+        self.delay_samples = max(0, int(delay_ms * sample_rate / 1000))
+        self.delay_buffer = np.zeros((self.delay_samples + 48000, 2), dtype=np.float32)
+        self.delay_write_pos = 0
 
         self.sos = butter(2, bass_cutoff, btype="low", fs=sample_rate, output="sos")
         self.zi = None
 
-        self.delay_config = DelayConfig()
         self.full_output_device = full_output_device
         self.bass_output_device = bass_output_device
         self.mute = mute
 
-        self.full_queue = queue.Queue(maxsize=16)
-        self.bass_queue = queue.Queue(maxsize=16)
+        self.full_queue = queue.Queue(maxsize=8)
+        self.bass_queue = queue.Queue(maxsize=8)
         self.running = False
 
         print(f"Full Output:    {self._dname(full_output_device)}")
@@ -201,10 +174,22 @@ class AudioRouter:
             return f"Device {did}"
 
     def process_chunk(self, audio):
-        live_ms = self.delay_config.get()
-        self.delay.set_delay(int(live_ms * self.sample_rate / 1000))
+        delay_ms = self.delay_config.get()
+        new_delay = max(0, int(delay_ms * self.sample_rate / 1000))
+        if new_delay != self.delay_samples:
+            self.delay_samples = new_delay
 
-        delayed_full = self.delay.process(audio)
+        n = audio.shape[0]
+        delayed_full = np.zeros_like(audio)
+        for i in range(n):
+            read_pos = (self.delay_write_pos - self.delay_samples + i) % len(
+                self.delay_buffer
+            )
+            delayed_full[i] = self.delay_buffer[read_pos]
+            self.delay_buffer[(self.delay_write_pos + i) % len(self.delay_buffer)] = (
+                audio[i]
+            )
+        self.delay_write_pos = (self.delay_write_pos + n) % len(self.delay_buffer)
 
         if self.zi is None:
             n_sections = self.sos.shape[0]
@@ -215,14 +200,19 @@ class AudioRouter:
 
     def _output_thread(self, device_id, q):
         stream = sd.OutputStream(
-            device=device_id, samplerate=self.sample_rate, channels=2, latency="low"
+            device=device_id,
+            samplerate=self.sample_rate,
+            channels=2,
+            latency="low",
+            blocksize=480,
         )
         stream.start()
         try:
             while self.running:
                 try:
-                    chunk = q.get(timeout=0.1)
+                    chunk = q.get(timeout=0.05)
                 except queue.Empty:
+                    stream.write(np.zeros((480, 2), dtype=np.float32))
                     continue
                 if chunk is None:
                     break
@@ -257,7 +247,7 @@ class AudioRouter:
         bt.start()
 
         bps = 4
-        spc = int(self.sample_rate * 0.05)
+        spc = 480
         bpc = spc * 2 * bps
 
         try:
