@@ -163,7 +163,7 @@ class PopoverController(NSObject):
         self.view.addSubview_(self.delayVal)
         y -= 18
         self.delaySlider = make_slider(
-            NSMakeRect(12, y, W - 24, 16), 0, 500, 150, self, "delayChanged:"
+            NSMakeRect(12, y, W - 24, 16), 0, 1000, 150, self, "delayChanged:"
         )
         self.view.addSubview_(self.delaySlider)
 
