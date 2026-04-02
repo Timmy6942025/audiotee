@@ -12,7 +12,6 @@ import json
 import time
 import fcntl
 import threading
-import queue
 
 
 DEFAULT_BASS_CUTOFF = 80
@@ -45,27 +44,32 @@ class RingBuffer:
         self._lock = threading.Lock()
 
     def write(self, data):
-        n = data.shape[0]
+        n = len(data)
         with self._lock:
-            for i in range(n):
-                self.buffer[(self.write_pos + i) % self.capacity] = data[i]
+            end = min(self.write_pos + n, self.capacity)
+            copy1 = end - self.write_pos
+            self.buffer[self.write_pos : end] = data[:copy1]
+            if copy1 < n:
+                self.buffer[: n - copy1] = data[copy1:]
             self.write_pos = (self.write_pos + n) % self.capacity
 
     def read(self, count):
-        out = np.zeros((count, 2), dtype=np.float32)
         with self._lock:
-            for i in range(count):
-                out[i] = self.buffer[(self.read_pos + i) % self.capacity]
-            self.read_pos = (self.read_pos + count) % self.capacity
-        return out
+            return self._read_unsafe(self.read_pos, count)
 
     def read_delayed(self, count, delay_samples):
-        out = np.zeros((count, 2), dtype=np.float32)
         with self._lock:
-            for i in range(count):
-                pos = (self.read_pos - delay_samples + i) % self.capacity
-                out[i] = self.buffer[pos]
-            self.read_pos = (self.read_pos + count) % self.capacity
+            return self._read_unsafe(self.read_pos - delay_samples, count)
+
+    def _read_unsafe(self, start, count):
+        start = start % self.capacity
+        end = min(start + count, self.capacity)
+        copy1 = end - start
+        out = np.empty((count, 2), dtype=np.float32)
+        out[:copy1] = self.buffer[start:end]
+        if copy1 < count:
+            out[copy1:] = self.buffer[: count - copy1]
+        self.read_pos = (self.read_pos + count) % self.capacity
         return out
 
 
@@ -88,9 +92,9 @@ class AudioRouter:
         b, a = butter(2, bass_cutoff / (sample_rate / 2), btype="low")
         self.bass_b = b
         self.bass_a = a
-        self.bass_zi = np.zeros((2, 2), dtype=np.float32)
+        self.bass_zi = None
 
-        self.delay_samples = max(0, int(delay_ms * sample_rate / 1000))
+        self.delay_ms = float(delay_ms)
         self.full_buffer = RingBuffer(sample_rate * 2)
         self.bass_buffer = RingBuffer(sample_rate * 2)
 
@@ -153,33 +157,29 @@ class AudioRouter:
             if not raw:
                 time.sleep(0.001)
                 continue
+
             audio = np.frombuffer(raw, dtype=np.float32).reshape(-1, 2)
 
-            full, self.bass_zi = lfilter(
+            if self.bass_zi is None:
+                self.bass_zi = np.zeros((len(self.bass_b) - 1, 2))
+
+            bass_filtered, self.bass_zi = lfilter(
                 self.bass_b, self.bass_a, audio, axis=0, zi=self.bass_zi
             )
-            full_out = full.astype(np.float32)
 
-            self.full_buffer.write(full_out)
-            self.bass_buffer.write(audio - full_out)
+            self.full_buffer.write(audio)
+            self.bass_buffer.write(bass_filtered.astype(np.float32))
 
     def full_callback(self, outdata, frames, time_info, status):
-        if status:
-            pass
-        delay_ms = 150
         try:
-            cfg = _read_config()
-            delay_ms = cfg.get(
-                "delay_ms", self.delay_samples * 1000 // self.sample_rate
-            )
+            delay_ms = _read_config().get("delay_ms", self.delay_ms)
+            self.delay_ms = float(delay_ms)
         except Exception:
             pass
-        delay_samples = max(0, int(delay_ms * self.sample_rate / 1000))
-        outdata[:] = self.full_buffer.read_delayed(frames, delay_samples)
+        ds = max(0, int(self.delay_ms * self.sample_rate / 1000))
+        outdata[:] = self.full_buffer.read_delayed(frames, ds)
 
     def bass_callback(self, outdata, frames, time_info, status):
-        if status:
-            pass
         outdata[:] = self.bass_buffer.read(frames)
 
     def run(self):
@@ -191,8 +191,7 @@ class AudioRouter:
             return
         print("Running. Ctrl+C to stop.\n")
 
-        capture_t = threading.Thread(target=self.capture_thread, daemon=True)
-        capture_t.start()
+        threading.Thread(target=self.capture_thread, daemon=True).start()
 
         full_stream = sd.OutputStream(
             device=self.full_output_device,
@@ -214,14 +213,7 @@ class AudioRouter:
 
         try:
             while True:
-                time.sleep(0.5)
-                cfg = _read_config()
-                new_delay = max(
-                    0, int(cfg.get("delay_ms", 150) * self.sample_rate / 1000)
-                )
-                if new_delay != self.delay_samples:
-                    self.delay_samples = new_delay
-                    print(f"Delay updated: {cfg.get('delay_ms', 150)}ms")
+                time.sleep(1)
         except KeyboardInterrupt:
             print("\nStopping...")
         finally:
