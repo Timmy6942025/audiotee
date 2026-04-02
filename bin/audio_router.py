@@ -37,6 +37,22 @@ def _get_live_delay_ms():
     return _read_config().get("delay_ms", DEFAULT_DELAY_MS)
 
 
+class DelayConfig:
+    def __init__(self):
+        self._delay_ms = DEFAULT_DELAY_MS
+        self._last_check = 0
+        self._interval = 0.2
+
+    def get(self):
+        import time
+
+        now = time.time()
+        if now - self._last_check > self._interval:
+            self._delay_ms = _read_config().get("delay_ms", DEFAULT_DELAY_MS)
+            self._last_check = now
+        return self._delay_ms
+
+
 class AudioteeCapture:
     def __init__(self, sample_rate=DEFAULT_SAMPLE_RATE, mute=True):
         self.sample_rate = sample_rate
@@ -161,6 +177,7 @@ class AudioRouter:
         self.sos = butter(2, bass_cutoff, btype="low", fs=sample_rate, output="sos")
         self.zi = None
 
+        self.delay_config = DelayConfig()
         self.full_output_device = full_output_device
         self.bass_output_device = bass_output_device
         self.mute = mute
@@ -184,7 +201,7 @@ class AudioRouter:
             return f"Device {did}"
 
     def process_chunk(self, audio):
-        live_ms = _get_live_delay_ms()
+        live_ms = self.delay_config.get()
         self.delay.set_delay(int(live_ms * self.sample_rate / 1000))
 
         delayed_full = self.delay.process(audio)

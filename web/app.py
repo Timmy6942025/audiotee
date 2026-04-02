@@ -2,7 +2,6 @@
 """Web GUI for Audio Router."""
 
 import json
-import math
 import os
 import select
 import signal
@@ -10,9 +9,9 @@ import subprocess
 import sys
 import threading
 import time
+import atexit
 from pathlib import Path
 
-import numpy as np
 import sounddevice as sd
 from flask import Flask, jsonify, render_template, request
 
@@ -58,6 +57,8 @@ def get_devices():
 
 
 def generate_click(sample_rate=48000, duration_ms=50, freq=1000):
+    import numpy as np
+
     t = np.linspace(0, duration_ms / 1000, int(sample_rate * duration_ms / 1000), False)
     click = np.sin(2 * np.pi * freq * t)
     envelope = np.exp(-t * 80)
@@ -66,6 +67,8 @@ def generate_click(sample_rate=48000, duration_ms=50, freq=1000):
 
 def metronome_loop():
     global metronome_running
+    import numpy as np
+
     sample_rate = 48000
     click = generate_click(sample_rate)
     click_bass = generate_click(sample_rate, freq=200)
@@ -103,7 +106,7 @@ def metronome_loop():
             beat += 1
             time.sleep(interval)
     except Exception:
-        pass
+        metronome_running = False
     finally:
         if full_stream:
             full_stream.stop()
@@ -127,9 +130,13 @@ def api_devices():
 def api_status():
     global router_status
     with router_lock:
-        if router_process and router_process.poll() is not None:
-            router_status["running"] = False
-            router_status["pid"] = None
+        if router_process:
+            rc = router_process.poll()
+            if rc is not None:
+                router_status["running"] = False
+                router_status["pid"] = None
+                if rc != 0:
+                    router_status["error"] = f"Router exited with code {rc}"
         return jsonify(router_status.copy())
 
 
@@ -314,6 +321,20 @@ def api_metronome_bpm():
         return jsonify({"error": "bpm required"}), 400
     metronome_config["bpm"] = int(bpm)
     return jsonify({"ok": True, "bpm": metronome_config["bpm"]})
+
+
+def _stop_router():
+    global router_process, router_status
+    if router_process and router_process.poll() is None:
+        try:
+            router_process.send_signal(signal.SIGINT)
+            router_process.wait(timeout=3)
+        except Exception:
+            router_process.kill()
+    router_status = {"running": False, "pid": None, "error": None}
+
+
+atexit.register(_stop_router)
 
 
 def main():
