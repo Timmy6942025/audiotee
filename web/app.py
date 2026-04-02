@@ -314,13 +314,13 @@ def api_metronome_stop():
 
 @app.route("/api/metronome/bpm", methods=["POST"])
 def api_metronome_bpm():
-    global metronome_running
     data = request.get_json(force=True, silent=True) or {}
     bpm = data.get("bpm")
     if bpm is None:
         return jsonify({"error": "bpm required"}), 400
-    metronome_config["bpm"] = int(bpm)
-    return jsonify({"ok": True, "bpm": metronome_config["bpm"]})
+    with metronome_lock:
+        metronome_config["bpm"] = int(bpm)
+        return jsonify({"ok": True, "bpm": metronome_config["bpm"]})
 
 
 def _stop_router():

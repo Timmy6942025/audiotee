@@ -5,12 +5,13 @@ import numpy as np
 import sounddevice as sd
 from scipy.signal import butter, sosfilt
 import subprocess
-import threading
 import argparse
 import sys
 import os
 import json
 import time
+import select
+import fcntl
 
 
 DEFAULT_BASS_CUTOFF = 80
@@ -130,8 +131,6 @@ class AudioRouter:
             stdin=subprocess.DEVNULL,
         )
 
-        import select, fcntl
-
         fd = self.audiotee_proc.stderr.fileno()
         flags = fcntl.fcntl(fd, fcntl.F_GETFL)
         fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
@@ -149,7 +148,7 @@ class AudioRouter:
                         return True
                     if msg.get("message_type") == "stream_start":
                         return True
-            except:
+            except (json.JSONDecodeError, UnicodeDecodeError):
                 pass
             time.sleep(0.2)
         return False
