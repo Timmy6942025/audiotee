@@ -200,11 +200,17 @@ class AudioRouter:
         bpc = spc * 2 * bps
 
         try:
+            audio_detected = False
             while self.running:
                 raw = self.read_audio(bpc)
                 if raw is None:
                     continue
                 audio = np.frombuffer(raw, dtype=np.float32).reshape(-1, 2)
+                if not audio_detected:
+                    rms = np.sqrt(np.mean(audio**2))
+                    if rms > 0.001:
+                        print("Audio detected - routing started")
+                        audio_detected = True
                 full, bass = self.process_chunk(audio)
                 self.full_stream.write(np.ascontiguousarray(full))
                 self.bass_stream.write(np.ascontiguousarray(bass))
